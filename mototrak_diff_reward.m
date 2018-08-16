@@ -19,11 +19,27 @@ function behav_stats = mototrak_diff_reward(GUI_h)
 %% EXPERIMENTAL PARAMETERS
 
 params = GUI_h.params;
+moto   = GUI_h.moto;
 GUI_h.params = [];
+GUI_h.moto   = [];
 
 %% Mototrak and sound initialization
-moto=Connect_MotoTrak;
-moto.autopositioner(params.lever_pos);
+if params.lever_pos > 4 || params.lever_pos < -2
+    warning('specified lever position was %.2f, but it must be between -2 and 4 (cm)',params.lever_pos);
+    return;
+end
+moto_reset = dialog('WindowStyle', 'normal','units','normalized','position',[.5 .5 .2 .1],'Name','Lever Positionning');
+uicontrol(moto_reset,'style','text','string',sprintf('Repositionning lever\nPlease wait...'),'units','normalized','position',[0 0 1 0.75],'FontSize',16);
+% reset position
+% moto.autopositioner(0); %reset position
+% drawnow;
+% pause(8);
+
+% move to specified position
+moto.autopositioner(-100*(params.lever_pos-4.5));
+if ishandle(moto_reset)
+    close(moto_reset);
+end
 b=moto.baseline();
 m=moto.cal_grams()/moto.n_per_cal_grams();
 
@@ -37,55 +53,94 @@ reward_sound      = speaker_sounds(params.reward_sound ,0.3,10);
 [force_plot,force_fig,threshold_line,hit_window_line]=create_lever_force_fig(params.force_target, params.hit_window);
 reset_gui_counters(GUI_h);
 
+% wait until user is ready to start
+ready_start = msgbox('Click OK when ready to start!','Are you ready?','warn');
+uiwait(ready_start);
+
 experiment_start=tic;
+loop_timer = tic;
 experiment_start_time = datetime('now');
 disp('experiment started!')
 
 % structure to save all results, as well as experimental parameters
 behav_stats = struct(...
     'params'            ,params,...
+    'trial_type_labels' ,{params.trial_type},...
     'num_rewards'       ,zeros(size(params.trial_type)),...
     'num_pellets'       ,zeros(size(params.trial_type)),...
     'num_trials'        ,zeros(size(params.trial_type)),...
-    'lever_force'       ,{{}},...
-    'trial_data'        ,{{}},...
-    'session_time'      ,experiment_start_time,...
-    'results'           ,[]...  % for back compatibility with ME 'experiment.m' analysis code
+    'start_time'        ,experiment_start_time, ...
+    'duration'          ,0,...
+    'trials_duration'   ,[],...
+    'trials_lever_force',[],...
+    'trials_success'    ,[],...
+    'trials_hold_time'  ,[],...
+    'trials_type'       ,[] ...
     );
 
+% behav_stats = struct(...
+%     'params'            ,params,...
+%     'num_rewards'       ,zeros(size(params.trial_type)),...
+%     'num_pellets'       ,zeros(size(params.trial_type)),...
+%     'num_trials'        ,zeros(size(params.trial_type)),...
+%     'trials_duration'   ,{cell(size(params.trial_type))},...
+%     'lever_force'       ,{cell(size(params.trial_type))},...
+%     'hold_time'         ,{cell(size(params.trial_type))},...
+%     'success'           ,{cell(size(params.trial_type))},...
+%     'start_time'        ,experiment_start_time, ...
+%     'duration'          ,0 ...
+%     );
+% trials_duration    = {};
+% trials_lever_force = {};
+% trials_hold_time   = {};
+% trials_success     = {};
+% trials_type        = {};
+
 tmp_force_buffer   = [nan nan]; % [time force], first row is oldest data
-trial_force_buffer = [nan nan];
+trial_force_buffer = [nan nan]; % [time force]
 trial_started      = false;
-post_trial_pause   = false; 
+post_trial_pause   = false;
+current_hold_time  = nan;
 pause_duration     = 0;
 send_pellets       = 0;
-trial_counter      = 0;
+force_before       = 0;
+force_now          = 0;
 last_pellet_time   = toc(experiment_start);
-stop_button        = set(GUI_h.stop_button,'userdata',0);
-feed_button        = set(GUI_h.feed_button,'userdata',0);
-session_rank       = 0; % get this somehow with the GUI, from previously recorded data
 success_trial      = false;
+man_pellets        = 0; % number of pellets given manually (feed button)
+set(GUI_h.stop_button,'userdata',0);
+set(GUI_h.feed_button,'userdata',0);
 
-% --->these are for backcompatibility but should be removed soon
-max_value   = 0;
+
+
+% --->these are for backcompatibility  with ME 'experiment.m' analysis code but should be removed soon
 jackpot_val = [1 0 -1];
+results     = [];
 % <-----
 
 try
     %% Main experiment loop
-    while toc(experiment_start)<params.duration && ~get(GUI_h.stop_button,'userdata')
+    while toc(experiment_start)<params.duration && ~GUI_h.stop_button.UserData && ishandle(force_plot)
         
-        time_now   = toc(experiment_start);
-        force_now  = m*(moto.read_Pull()-b);
+        time_now     = toc(experiment_start);
+        force_before = force_now;
+        force_now    = m*(moto.read_Pull()-b);
         
-        %limiter taille buffer temporaire à 0.5s
-        tmp_force_buffer = [tmp_force_buffer(time_now-tmp_force_buffer(:,1)<=0.5,:); time_now force_now];
-
+        %limiter taille buffer temporaire à fbuf_dur
+        tmp_force_buffer = [tmp_force_buffer(time_now-tmp_force_buffer(:,1)<=params.fbuf_dur,:); time_now force_now];
         
-        %% trial initiation?
-        if ~trial_started && force_now > params.init_thresh
-            trial_started    = true;
-            trial_start_time = time_now;
+        % warn if longer than expected loop delays
+        loop_time = toc(loop_timer);
+        if loop_time > 0.1
+            fprintf('--- WARNING --- \nlong delay in while loop (%.0f ms)\n',loop_time*1000);
+        end
+        loop_timer = tic;        
+        
+        %% trial initiation
+        if ~trial_started && force_now >= params.init_thresh && force_before < params.init_thresh
+            trial_started     = true;
+            trial_start_time  = time_now;
+            current_hold_time = min(params.hold_time,params.hold_time_max);
             
             % decide trial type
             trial_type_select = 100*rand;
@@ -106,40 +161,47 @@ try
                 moto.trigger_stim(1);
             end
             
+            fprintf('Hold time : %.0f ms\n',current_hold_time*1000);
+            
+            % update GUI
+            eval( ['GUI_h.tt' num2str(trial_type) '_num_trials_txt.String =  behav_stats.num_trials(trial_type);']);
             % start recording force
             trial_force_buffer = [tmp_force_buffer(:,1)-trial_start_time tmp_force_buffer(:,2)];
         end
         
-        %% during trial
+        %% ongoing trial
         if trial_started
-
+            
             trial_time = time_now-trial_start_time;
             trial_force_buffer = [trial_force_buffer; trial_time force_now];
             
-            if post_trial_pause
-                % pause after trial, and give pellets as needed
-                if send_pellets && trial_time-last_pellet_time>params.pellets_pause
-                    moto.trigger_feeder(1);
-                    last_pellet_time = trial_time;
-                    send_pellets = send_pellets-1;
-                elseif trial_time-trial_end_time > pause_duration
-                    %pause is over, fill result structure and start new trial
-                    behav_stats.lever_force = [behav_stats.lever_force {trial_force_buffer'}];
-                    % TODO: behav_stats.trial_data  data table instead of .lever_force with all trial info;
+            if post_trial_pause 
+                if trial_time-trial_end_time > pause_duration && ~send_pellets              
+                    %pause is over, trial is over. fill result structure and start new trial
+                    behav_stats.trials_duration    = [behav_stats.trials_duration; {trial_end_time}];
+                    behav_stats.trials_lever_force = [behav_stats.trials_lever_force; {trial_force_buffer}];
+                    behav_stats.trials_hold_time   = [behav_stats.trials_hold_time; {current_hold_time}];
+                    behav_stats.trials_success     = [behav_stats.trials_success; {success_trial}];
+                    behav_stats.trials_type        = [behav_stats.trials_type; {trial_type}];
                     
                     %----> this is for back compatibility and should be removed soon
-                    new_results = [session_rank;params.task_level;params.lever_pos;params.hit_window;...
-                                    params.hold_time,params.force_target;success_trial;max_value;...
-                                    trial_end_time;params.num_pellets(trial_type); jackpot_val(trial_type)];
-                    behav_stats.results = [ behav_stats.results new_results];
-                    max_value           = 0;
+                    max_value=max(trial_force_buffer(:,2));
+                    new_results = [params.session_number;params.task_level;params.lever_pos;params.hit_window;...
+                        params.hold_time;params.force_target;success_trial;max_value;...
+                        trial_end_time;success_trial*params.num_pellets(trial_type); jackpot_val(trial_type)];
+                    results     = [results new_results];
                     %<----
                     
+                    %reset trial variables
                     post_trial_pause   = false;
                     trial_started      = false;
                     success_trial      = false;
                     trial_force_buffer = [nan nan];
                     
+                    % send digital pulses out
+                    for i=1:6
+                        moto.trigger_stim(1);
+                    end
                 end
             else
                 
@@ -148,23 +210,32 @@ try
                     %trial failed
                     fprintf('trial failed\n\n');
                     post_trial_pause = true;
-                    max_value=max(trial_force_buffer(:,2));
-                    trial_end_time = trial_time;
-                    pause_duration = params.mastication_time;
+                    trial_end_time   = trial_time;
+                    % pause_duration   = params.mastication_time;
+                    pause_duration   = 2;
+                    params.past_10_trials_succ = [false params.past_10_trials_succ(1:end-1)];
+                %decrease hold_time?
+                    if params.adapt_hold_time && sum(params.past_10_trials_succ)<=3
+                        % less than 40% success rate, decrease hold time by 1%.
+                        % update hold time
+                        params.hold_time = current_hold_time * 0.99;
+                        set(GUI_h.hold_time_edit,'String',num2str(params.hold_time*1000));
+                    end
                 end
                 
                 % Success?
                 % if we are at least 'hold_time' past trial init, and if force was always above 'force_target'
                 % for the last 'hold_time'...
-                if trial_time >= params.hold_time && ...
-                        all( trial_force_buffer( trial_force_buffer(:,1)>=trial_time-params.hold_time ,2)>= params.force_target)
+                if trial_time >= current_hold_time && ...
+                        all( trial_force_buffer( trial_force_buffer(:,1)>=trial_time-current_hold_time ,2)>= params.force_target)
                     % we have a success
                     fprintf('trial successful!\n\n');
+                    
                     play(reward_sound{1});
                     success_trial  = true;
                     trial_end_time = trial_time;
-                    max_value=max(trial_force_buffer(:,2));
                     send_pellets   = params.num_pellets(trial_type);
+                    params.past_10_trials_succ = [true params.past_10_trials_succ(1:end-1)];
                     
                     % send digital pulses out
                     for i=1:3
@@ -172,398 +243,142 @@ try
                     end
                     
                     %update stats
-                    behav_stats.num_rewards(trial_type) = behav_stats.num_rewards(trial_type)+1;
-                    behav_stats.num_pellets(trial_type) = behav_stats.num_pellets(trial_type)+params.num_pellets(trial_type);
-                     
+                    behav_stats.num_rewards(trial_type)     = behav_stats.num_rewards(trial_type)+1;
+                    behav_stats.num_pellets(trial_type)     = behav_stats.num_pellets(trial_type)+params.num_pellets(trial_type);
+                    
                     % update GUI stats
                     set(GUI_h.pellets_delivered_txt,'String', sprintf('%d (%.3f g)', ...
-                        sum(behav_stats.num_pellets), sum(behav_stats.num_pellets)*0.045));
+                        sum(behav_stats.num_pellets)+man_pellets, (sum(behav_stats.num_pellets)+man_pellets)*0.045));
+                    eval( ['GUI_h.tt' num2str(trial_type) '_num_rew_txt.String =  behav_stats.num_rewards(trial_type);']);
                     
                     %force pause
                     post_trial_pause = true;
-                    pause_duration = max(params.mastication_time*[1 params.num_pellets(trial_type)]);
+%                     pause_duration = max(params.mastication_time*[1 params.num_pellets(trial_type)]);
+                     pause_duration = max(2,params.mastication_time*params.num_pellets(trial_type));
                     % pause is at least 1x mastication time, or more if more than 1 pellet
+                    
+                    %increase hold_time?
+                    if params.adapt_hold_time && sum(params.past_10_trials_succ)>=5
+                        % more than 60% success rate, increase hold time.
+                        params.hold_time = min(params.hold_time_max, current_hold_time * 1.02);
+                        %clear success flags to avoid multiple increases in a row ?
+                        %->not now. Allowing multiple increase/decrease in a row.
+                        % params.past_10_trials_succ = false(1,10);
+                        % update hold time
+                        set(GUI_h.hold_time_edit,'String',num2str(params.hold_time*1000));
+                    end
+                    
                 end
             end
         end
         
+        % give pellets when needed
+        if send_pellets && time_now-last_pellet_time>params.pellets_pause
+            moto.trigger_feeder(1);
+            last_pellet_time = time_now;
+            send_pellets = send_pellets-1;
+        end
         
         % update force fig
-        set(force_plot,'XData', trial_force_buffer(:,1),...
-            'YData',trial_force_buffer(:,2));
-        
-        % update GUI time
+        if ishandle(force_plot)
+            set(force_plot,'XData', trial_force_buffer(:,1),...
+                'YData',trial_force_buffer(:,2));
+        end
+            
+        % update GUI
         set(GUI_h.time_elapsed_txt,'String',datestr(time_now/86400,'HH:MM:SS'));
         
         % check feed button
         if get(GUI_h.feed_button,'userdata')
             set(GUI_h.feed_button,'userdata',0);
-            moto.moto.trigger_feeder(1);
+            moto.trigger_feeder(1);
+            man_pellets = man_pellets + 1;
+            set(GUI_h.pellets_delivered_txt,'String', sprintf('%d (%.3f g)', ...
+                sum(behav_stats.num_pellets)+man_pellets, (sum(behav_stats.num_pellets)+man_pellets)*0.045));
         end
         
-        drawnow; %update GUI and force fig
+%         % update params from GUI
+        if ~isempty(get(GUI_h.start_button,'userdata'))
+            params = GUI_h.start_button.UserData;
+            set(GUI_h.start_button,'userdata',[]);
+        end
+            
+        
+        drawnow limitrate; %update GUI and force fig
         
     end
     
     %% end of session: display and save results
     disp('session ended');
-    disp('summary:');
-    disp('type    trials  reward  pellets');
+    behav_stats.duration = time_now;
+    fprintf('duration: %s\n\n',datestr(time_now/86400,'HH:MM:SS'));
+    disp('result summary:');
+    disp('type      trials  rewards  pellets');
     for i=1:length(params.trial_type)
         disp([params.trial_type{i} sprintf('\t\t%d',behav_stats.num_trials(i))...
-               sprintf('\t\t%d',behav_stats.num_rewards(i)) sprintf('\t\t%d',behav_stats.num_pellets(i))]);
+            sprintf('\t\t%d',behav_stats.num_rewards(i)) sprintf('\t\t%d',behav_stats.num_pellets(i))]);
     end
+    fprintf('manual feeding: %d pellets\n', man_pellets);
+    fprintf('total pellets: %d (%.2f g)\n',...
+        sum(behav_stats.num_pellets)+man_pellets, (sum(behav_stats.num_pellets)+man_pellets)*0.045);
     
-    %save results
-    if params.cno
-        save_name = [params.animal_name,'_cno_',datestr(experiment_start_time,30)];
-    else
-        save_name = [params.animal_name,'_',datestr(experiment_start_time,30),'s.mat'];
-    end
-    
-    save([save_name 's.mat'],behav_stats);
-    save([save_name 's_ME.mat'],results);
-    
-    
-%     nnn=char(beginning_session_time);
-%     keep animal_name nnn results current_trial lever_force cno
-%
-%     if strfind(cno,'y')
-%         save([animal_name,'_cno_',nnn(1:11),'_',nnn(end-7:end-6),'h',nnn(end-4:end-3),'m',nnn(end-1:end),'s.mat'])
-%     else
-%         save([animal_name,'_',nnn(1:11),'_',nnn(end-7:end-6),'h',nnn(end-4:end-3),'m',nnn(end-1:end),'s.mat'])
-%     end
+    %save updated params & results
+    save_params_and_results(GUI_h,params,behav_stats,results,experiment_start_time,0);
     
     % cleanup
-    fclose(moto.serialcon);
-    close(force_fig);
+    %fclose(moto.serialcon);
+    if ishandle(force_fig)
+        close(force_fig);
+    end
     
 catch ME
-    fclose(moto.serialcon);
-    close(force_fig);
+    %fclose(moto.serialcon);
+    if ishandle(force_fig)
+        close(force_fig);
+    end
+    GUI_h.start_button.UserData = [];
+    GUI_h.start_button.String = 'START';
+    save_params_and_results(GUI_h,params,behav_stats,results,experiment_start_time,1);
     rethrow(ME);
 end
 
+end
 
-%     %% old code
-%
-%     if current_trial(4)==0 %hold time nul (levels 1, 2 et 3)
-%         if current_trial(5)==10 %jamais vrai quand hold time différent de 0 (level1 et début level2)
-%             if force_now>=10 %essai démarré et immédiatement réussi (level1 et début level2)
-%                 [jackpot]=eval_trial_type(moto,sons,current_trial,jackpot_percentage,noreward_percentage);
-%                 trial_started=1; trial_start=tic;
-%                 lever_force{current_trial_rank}=[buffer_force(1,:)-buffer_force(1,end);buffer_force(2,:)];
-%                 set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                     'YData',lever_force{current_trial_rank}(2,:));
-%                 drawnow
-%                 success_trial=1;moment_reussite=tic;
-%                 %pas de son de récompense: il serait concomittant avec début essai
-%                 time_to_success=0;
-%                 for i=1:3
-%                     moto.trigger_stim(1)
-%                 end
-%                 if jackpot==1
-%                     disp('jackpot reward!')
-%                     for i=1:5
-%                         moto.trigger_feeder(1)
-%                         fin_dispense_pellet=tic;
-%                         while toc(fin_dispense_pellet)<1.5
-%                             force_now=m*(moto.read_Pull()-b);
-%                             lever_force{current_trial_rank}=[lever_force{current_trial_rank} ...
-%                                 [toc(trial_start);force_now]];
-%                             set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                                 'YData',lever_force{current_trial_rank}(2,:));
-%                             drawnow
-%                         end
-%                     end
-%                 else
-%                     disp('single reward!')
-%                     moto.trigger_feeder(1)
-%                     while toc(trial_start)<current_trial(3) %hit window
-%                         force_now=m*(moto.read_Pull()-b);
-%                         lever_force{current_trial_rank}=[lever_force{current_trial_rank} ...
-%                             [toc(trial_start);force_now]];
-%                         set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                             'YData',lever_force{current_trial_rank}(2,:));
-%                         drawnow
-%                     end
-%                 end
-%                 max_value=max(lever_force{current_trial_rank}(2,:));
-%                 if success_trial==0
-%                     time_to_success=nan;
-%                     disp('end of hit window')
-%                     disp('failed')
-%                     fin_hit_window=tic;
-%                     temps_post_reussite=2;
-%                     while toc(fin_hit_window)<temps_post_reussite
-%                         force_now=m*(moto.read_Pull()-b);
-%                         lever_force{current_trial_rank}=[lever_force{current_trial_rank} ...
-%                             [toc(trial_start);force_now]];
-%                         set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                             'YData',lever_force{current_trial_rank}(2,:));
-%                         drawnow
-%                     end
-%                 else
-%                     if jackpot==1
-%                         temps_post_reussite=temps_mastication_pellet*5;
-%                     else
-%                         temps_post_reussite=temps_mastication_pellet;
-%                     end
-%                     while toc(moment_reussite)<temps_post_reussite
-%                         force_now=m*(moto.read_Pull()-b);
-%                         lever_force{current_trial_rank}=[lever_force{current_trial_rank} ...
-%                             [toc(trial_start);force_now]];
-%                         set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                             'YData',lever_force{current_trial_rank}(2,:));
-%                         drawnow
-%                     end
-%                 end
-%                 for i=1:6
-%                     moto.trigger_stim(1)
-%                 end
-%             end
-%         elseif force_now>=10 %essai démarré mais non immédiatement réussi sans hold time (levels 2 et 3)
-%             [jackpot]=eval_trial_type(moto,sons,current_trial,jackpot_percentage,noreward_percentage);
-%             k=1; trial_started=1; trial_start=tic;
-%             lever_force{current_trial_rank}=[buffer_force(1,:)-buffer_force(1,end);buffer_force(2,:)];
-%             set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                 'YData',lever_force{current_trial_rank}(2,:));
-%             drawnow
-%             while toc(trial_start)<current_trial(3) %hit window
-%                 force_now=m*(moto.read_Pull()-b);
-%                 lever_force{current_trial_rank}=[lever_force{current_trial_rank} ...
-%                     [toc(trial_start);force_now]];
-%                 set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                     'YData',lever_force{current_trial_rank}(2,:));
-%                 drawnow
-%                 if force_now>=current_trial(5) && k==1
-%                     play(sons.success); success_trial=1; time_to_success=toc(trial_start);moment_reussite=tic;
-%                     for i=1:3
-%                         moto.trigger_stim(1)
-%                     end
-%                     if jackpot==1
-%                         disp('jackpot reward!');
-%                         for i=1:5
-%                             moto.trigger_feeder(1)
-%                             fin_dispense_pellet=tic;
-%                             while toc(fin_dispense_pellet)<1.5
-%                                 force_now=m*(moto.read_Pull()-b);
-%                                 lever_force{current_trial_rank}=[lever_force{current_trial_rank} ...
-%                                     [toc(trial_start);force_now]];
-%                                 set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                                     'YData',lever_force{current_trial_rank}(2,:));
-%                                 drawnow
-%                             end
-%                         end
-%                     elseif jackpot==0
-%                         disp('single reward!')
-%                         moto.trigger_feeder(1)
-%                     elseif jackpot==-1
-%                         disp('successful but no reward')
-%                     end
-%                     k=k+1;
-%                 end
-%             end
-%             max_value=max(lever_force{current_trial_rank}(2,:));
-%             if success_trial==0
-%                 time_to_success=nan;
-%                 disp('end of hit window')
-%                 disp('failed')
-%                 fin_hit_window=tic;
-%                 temps_post_reussite=2;
-%                 while toc(fin_hit_window)<temps_post_reussite
-%                     force_now=m*(moto.read_Pull()-b);
-%                     lever_force{current_trial_rank}=[lever_force{current_trial_rank} ...
-%                         [toc(trial_start);force_now]];
-%                     set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                         'YData',lever_force{current_trial_rank}(2,:));
-%                     drawnow
-%                 end
-%             else
-%                 if jackpot==1
-%                     temps_post_reussite=temps_mastication_pellet*5;
-%                 else
-%                     temps_post_reussite=temps_mastication_pellet;
-%                 end
-%                 while toc(moment_reussite)<temps_post_reussite
-%                     force_now=m*(moto.read_Pull()-b);
-%                     lever_force{current_trial_rank}=[lever_force{current_trial_rank} ...
-%                         [toc(trial_start);force_now]];
-%                     set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                         'YData',lever_force{current_trial_rank}(2,:));
-%                     drawnow
-%                 end
-%             end
-%             for i=1:6
-%                 moto.trigger_stim(1)
-%             end
-%         end
-%     else %hold time non nul (niveau 4)
-%         if force_now>=10 %essai démarre
-%             [jackpot]=eval_trial_type(moto,sons,current_trial,jackpot_percentage,noreward_percentage);
-%             k=1; trial_started=1; trial_start=tic;
-%             lever_force{current_trial_rank}=[buffer_force(1,:)-buffer_force(1,end);buffer_force(2,:)];
-%             set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                 'YData',lever_force{current_trial_rank}(2,:));
-%             drawnow
-%             while toc(trial_start)<current_trial(3) %hit window
-%                 force_now=m*(moto.read_Pull()-b);
-%                 lever_force{current_trial_rank}=[lever_force{current_trial_rank} ...
-%                     [toc(trial_start);force_now]];
-%                 set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                     'YData',lever_force{current_trial_rank}(2,:));
-%                 drawnow
-%                 if force_now>=current_trial(5) && k==1
-%                     %le k==1 permet: 1) d'éviter que réussite sur première hold time puis échec
-%                     %sur deuxième, si hit window non dépassée après première réussite; 2)
-%                     %d'éviter que plusieurs récompenses par essai
-%                     hold_start=tic;
-%                     while toc(hold_start)<current_trial(4) %hold time
-%                         force_now=m*(moto.read_Pull()-b);
-%                         lever_force{current_trial_rank}=[lever_force{current_trial_rank} ...
-%                             [toc(trial_start);force_now]];
-%                         set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                             'YData',lever_force{current_trial_rank}(2,:));
-%                         drawnow
-%                         if force_now>=current_trial(5)
-%                             success_trial=1;
-%                         else
-%                             success_trial=0;
-%                             break
-%                         end
-%                     end
-%                     if success_trial==1 %&& k==1
-%                         play(sons.success); time_to_success=toc(trial_start);moment_reussite=tic;
-%                         for i=1:3
-%                             moto.trigger_stim(1)
-%                         end
-%                         if jackpot==1
-%                             disp('jackpot reward!');
-%                             for i=1:5
-%                                 moto.trigger_feeder(1)
-%                                 fin_dispense_pellet=tic;
-%                                 while toc(fin_dispense_pellet)<1.5
-%                                     force_now=m*(moto.read_Pull()-b);
-%                                     lever_force{current_trial_rank}=[lever_force{current_trial_rank} ...
-%                                         [toc(trial_start);force_now]];
-%                                     set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                                         'YData',lever_force{current_trial_rank}(2,:));
-%                                     drawnow
-%                                 end
-%                             end
-%                         elseif jackpot==0
-%                             disp('single reward!')
-%                             moto.trigger_feeder(1)
-%                         elseif jackpot==-1
-%                             disp('successful but no reward')
-%                         end
-%                         k=k+1;
-%                     end
-%                 end
-%             end
-%             max_value=max(lever_force{current_trial_rank}(2,:));
-%             if success_trial==0
-%                 time_to_success=nan;
-%                 disp('end of hit window')
-%                 disp('failed')
-%                 fin_hit_window=tic;
-%                 temps_post_reussite=2;
-%                 while toc(fin_hit_window)<temps_post_reussite
-%                     force_now=m*(moto.read_Pull()-b);
-%                     lever_force{current_trial_rank}=[lever_force{current_trial_rank} ...
-%                         [toc(trial_start);force_now]];
-%                     set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                         'YData',lever_force{current_trial_rank}(2,:));
-%                     drawnow
-%                 end
-%             else
-%                 if jackpot==1
-%                     temps_post_reussite=temps_mastication_pellet*5;
-%                 else
-%                     temps_post_reussite=temps_mastication_pellet;
-%                 end
-%                 while toc(moment_reussite)<temps_post_reussite
-%                     force_now=m*(moto.read_Pull()-b);
-%                     lever_force{current_trial_rank}=[lever_force{current_trial_rank} ...
-%                         [toc(trial_start);force_now]];
-%                     set(force_plot,'XData',lever_force{current_trial_rank}(1,:),...
-%                         'YData',lever_force{current_trial_rank}(2,:));
-%                     drawnow
-%                 end
-%             end
-%             for i=1:6
-%                 moto.trigger_stim(1)
-%             end
-%         end
-%     end
-%
-%     if trial_started==1;
-%         disp('end of trial'); fprintf('\n')
-%         if success_trial==1
-%             if jackpot==1
-%                 pellet_dispensed=5;
-%             elseif jackpot==0
-%                 pellet_dispensed=1;
-%             elseif jackpot==-1
-%                 pellet_dispensed=0;
-%             end
-%         else
-%             pellet_dispensed=nan;
-%         end
-%         results=[results [session_rank;current_trial;success_trial;max_value;time_to_success;pellet_dispensed;jackpot]];
-%         results_all=[results_all results(:,end)];
-%         [current_trial]=eval_performance(results_all);
-%
-%         %ajouté le 18 octobre 2017:
-%         if animal_name=='jui-8-1' | animal_name=='jui-8-2'
-%             if current_trial(1)==4
-%                 if current_trial(4)>.8
-%                     current_trial(4)=.8;
-%                 end
-%                 current_trial(5)=80;
-%             end
-%         end
-%         if animal_name=='oct-4-2'
-%             current_trial(2)=450;
-%         end
-%
-%         set(threshold_line,'YData',[current_trial(5) current_trial(5)]);
-%         set(hit_window_line,'XData',[current_trial(3) current_trial(3)]);
-%         set(force_plot,'XData',0,'YData',0)
-%         if current_trial(1)~=results(2,end) & current_trial(1)==4
-%             xlim([-.5 15])
-%             set(threshold_line,'XData',[-.5 15],'YData',[current_trial(5) current_trial(5)],'Color','red');
-%         end
-%         drawnow
-%         trial_started=0; success_trial=0;current_trial_rank=size(results,2)+1;buffer_force=[];
-%         if numel(results)>=1 & current_trial(2)~=results(3,end)
-%             moto.autopositioner(current_trial(2))
-%         end
-%     end
-%
-% end
-%
-% %% Saving experiment
-%
-% disp('end of the session')
-% if numel(results)~=0
-%     disp(['number of successes: ', num2str(sum(results(7,:)))])
-%     disp(['dispensed pellets: ', num2str(.045*nansum(results(10,:))),' grams'])
-%     cd('D:\customized_behavioral_task_results'); %dossier où résultats
-%     cd(animal_name)
-%
-%     nnn=char(beginning_session_time);
-%     keep animal_name nnn results current_trial lever_force cno
-%
-%     if strfind(cno,'y')
-%         save([animal_name,'_cno_',nnn(1:11),'_',nnn(end-7:end-6),'h',nnn(end-4:end-3),'m',nnn(end-1:end),'s.mat'])
-%     else
-%         save([animal_name,'_',nnn(1:11),'_',nnn(end-7:end-6),'h',nnn(end-4:end-3),'m',nnn(end-1:end),'s.mat'])
-%     end
-%
-%     cd('C:\Users\TDT\Dropbox\EthierLab Team Folder\MotoTrak\customized_behavioral_task') %dossier scripts
-% end
-% close all
+function save_params_and_results(GUI_h,params,behav_stats,results,experiment_start_time,crashed)
 
-% succes_rate(results,3)
-% succes_rate(results,4)
+%reset the start button
+GUI_h.start_button.UserData = [];
+GUI_h.start_button.String = 'START';
+
+if crashed
+    SaveButton = questdlg(sprintf('mototrak_diff_reward_crashed!\n Save files?'), 'Shit Happens', 'Yes','No','Yes');
+else
+    SaveButton = questdlg(sprintf('End of behavioral session\nSave files?'), 'End of Seesion', 'Yes','No','Yes');
+end
+if strcmp(SaveButton,'Yes')
+    if params.cno
+        fname = [params.animal_name '_cno_' datestr(experiment_start_time,'yyyymmdd_HHMMSS')];
+    else
+        fname = [params.animal_name,'_',datestr(experiment_start_time,'yyyymmdd_HHMMSS')];
+    end
+    save(fullfile(params.save_dir,['params_' fname]),'-struct','params');
+    save(fullfile(params.save_dir,['behav_stats_' fname]),'-struct','behav_stats');
+    
+    %----> this is for back compatibility and should be removed soon
+    if params.cno
+        cno = 'y';
+    else
+        cno = 'n';
+    end
+    nnn = experiment_start_time;
+    animal_name = params.animal_name;
+    lever_force = behav_stats.trials_lever_force';
+    current_trial = results(2:6,end);
+    save(fullfile(params.save_dir,['results_ME_legacy_' fname]),'results','animal_name','cno','lever_force');
+    % <-----
+
+    disp('behavior stats and parameters saved successfully');
+else
+    disp('behavior stats and parameters not saved');
+end
+end

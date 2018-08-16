@@ -8,7 +8,6 @@ function sounds = speaker_sounds(freqs,duration,amplitude)
 %
 %   e.g. my_sounds = speaker_sounds([1000 5000 10000],[0.3 0.6 0.3],10);
 %       
-%
 
 num_sounds = length(freqs);
 

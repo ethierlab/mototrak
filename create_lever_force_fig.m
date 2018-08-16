@@ -14,8 +14,8 @@ ylim([-10 130])
 set(threshold_line,'XData',[-.5 10],'YData',[force_target force_target],'Color','red');
 set(hit_window_line,'XData',[hit_window hit_window],'YData',[-10 130],'Color','black');
 
-Feed_Button = uicontrol('Parent', force_fig, 'String', 'Feed','Units','normalized',...
-                            'Position', [.85 .85 .1 .1],'Callback',@Feed_Button_Callback,'Enable','on');
+% Feed_Button = uicontrol('Parent', force_fig, 'String', 'Feed','Units','normalized',...
+%                             'Position', [.85 .85 .1 .1],'Callback',@Feed_Button_Callback,'Enable','on');
 
 end
 
