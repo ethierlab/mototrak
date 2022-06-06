@@ -379,21 +379,6 @@ moto.lights = @(i)v1p4_simple_command(serialcon,'9i',i);                    %Set
 moto.autopositioner = @(int)v1p4_long_command(serialcon,'0nn',[],int);      %Set the function for setting the stimulation trigger duration on the Arduino.
 
 
-%Behavioral control functions.
-moto.play_hitsound = @(i)v1p4_simple_command(serialcon,'J', 1);             %Set the function for playing a hit sound on the Arduino
-% moto.digital_ir = @(i)simple_return(serialcon,'1i',i);                      %Set the function for checking the digital state of the behavioral IR inputs on the Arduino.
-% moto.analog_ir = @(i)simple_return(serialcon,'2i',i);                       %Set the function for checking the analog reading on the behavioral IR inputs on the Arduino.
-moto.feed = @(i)v1p4_simple_command(serialcon,'3A',1);                      %Set the function for triggering food/water delivery.
-moto.feed_dur = @()v1p4_simple_return(serialcon,'4',[]);                    %Set the function for checking the current feeding/water trigger duration on the Arduino.
-moto.set_feed_dur = @(int)v1p4_long_command(serialcon,'5nn',[],int);        %Set the function for setting the feeding/water trigger duration on the Arduino.
-moto.stim = @()v1p4_simple_command(serialcon,'6',[]);                       %Set the function for sending a trigger to the stimulation trigger output.
-moto.stim_off = @()v1p4_simple_command(serialcon,'h',[]);                   %Set the function for immediately shutting off the stimulation output.
-moto.stim_dur = @()v1p4_simple_return(serialcon,'7',[]);                    %Set the function for checking the current stimulation trigger duration on the Arduino.
-moto.set_stim_dur = @(int)v1p4_long_command(serialcon,'8nn',[],int);        %Set the function for setting the stimulation trigger duration on the Arduino.
-moto.lights = @(i)v1p4_simple_command(serialcon,'9i',i);                    %Set the function for turn the overhead cage lights on/off.
-moto.autopositioner = @(int)v1p4_long_command(serialcon,'0nn',[],int);      %Set the function for setting the stimulation trigger duration on the Arduino.
-
-
 %% This function checks the status of the serial connection.
 function output = v1p4_check_serial(serialcon)
 if isa(serialcon,'serial') && isvalid(serialcon) && ...
@@ -1324,7 +1309,7 @@ if isempty(port)                                                            %If 
 end
 busyports = setdiff(port.SerialPorts,port.AvailableSerialPorts);            %Find all ports that are currently busy.
 port = port.SerialPorts;                                                    %Save the list of all serial ports regardless of whether they're busy.
-port = intersect(port,{'COM7','COM8'});                                     %Kick out all ports that aren't COM7 or COM8.
+% port = intersect(port,{'COM7','COM8'});                                     %Kick out all ports that aren't COM7 or COM8.
 
 if waitbar.isclosed()                                                       %If the user closed the waitbar figure...
     errordlg('Connection to MotoTrak was cancelled by the user!',...

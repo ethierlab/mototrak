@@ -326,7 +326,7 @@ try
     save_params_and_results(GUI_h,params,behav_stats,results,experiment_start_time,0);
     
     % cleanup
-    %fclose(moto.serialcon);
+    fclose(moto.serialcon);
     if ishandle(force_fig)
         close(force_fig);
     end

@@ -1,18 +1,19 @@
-function [force_plot,force_fig,threshold_line,hit_window_line]=create_lever_force_fig(force_target, hit_window)
+function [force_plot,force_fig,hit_line,hit_window_line]=create_lever_force_fig(force_target, hit_window)
 x = 0;
 y = 0;   
 force_fig = figure;
 force_plot = plot(x,y);
-threshold_line = line(x,y);
-hit_window_line = line(x,y);
+hit_line = line(x,y);
+init_line = line(x,y);
+hit_window_lines = line(x,y);
 title('force exerted on the lever')
 xlabel('trial time (s)')
 ylabel('force (gr)')
-xlim([-.5 10])
-ylim([-10 130])
+xlim([-1 3])
+ylim([-5 100])
 
-set(threshold_line,'XData',[-.5 10],'YData',[force_target force_target],'Color','red');
-set(hit_window_line,'XData',[hit_window hit_window],'YData',[-10 130],'Color','black');
+set(hit_line,'XData',[-.5 10],'YData',[force_target force_target],'Color','red');
+set(hit_window_lines,'XData',[0 0; hit_window hit_window],'YData',[-10 130; -10 130],'Color','grey');
 
 % Feed_Button = uicontrol('Parent', force_fig, 'String', 'Feed','Units','normalized',...
 %                             'Position', [.85 .85 .1 .1],'Callback',@Feed_Button_Callback,'Enable','on');
